@@ -1,4 +1,4 @@
-# Predict heroin overdose events to better allocate prevention resources
+# Predict Opioid Overdose Events to Better Allocate Prevention Resources
 
 ## Group Members: Ziyi Yang, Xiaoyi Wu
 
