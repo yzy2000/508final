@@ -454,10 +454,9 @@ Given shooting is a relatively rare event, it is reasonable for most grid cells 
 ggplot(data = cin_final_net) +
   geom_histogram(aes(x = countopioid), fill = 'orange') +
   scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
-  labs(title="Histogram of Dependent Variable: Count of Observed Shootings",
-       subtitle = "Philadelphia, PA\n",
-       caption = "Figure 6") +
-  xlab('Count of Shootings') +
+  labs(title="Histogram of Dependent Variable: Opioid Overdose",
+       subtitle = "Cincinnati, OH\n") +
+  xlab('Count of Opioid') +
   ylab('Count') +
   plotTheme()
 ```
@@ -600,9 +599,8 @@ st_drop_geometry(reg.summary) %>%
   scale_shape_manual(values = c(2, 17)) +
   facet_wrap(~Regression) + xlim(0,10) +
   labs(title = "Predicted and Observed Shootings by Observed Shooting Decile\n",
-       subtitle = "Philadelphia, PA\n",
-       caption = 'Figure 7.3',
-       x = 'Shooting Decile') +
+       subtitle = "Cincinnati, OH\n",
+       x = 'Opioid Decile') +
   plotTheme()
 ```
 #### 8. A table of MAE and standard deviation MAE by regression.
@@ -731,7 +729,7 @@ rbind(burg_KDE_sf, burg_risk_sf) %>%
     facet_wrap(~label, ) +
     scale_fill_viridis(discrete = TRUE) +
     labs(title="Comparison of Kernel Density and Risk Predictions",
-         subtitle="2017 weapon violation risk predictions; 2018 weapon violation") +
+         subtitle="2016 opiod overdose risk predictions; 2018 opioid overdose") +
     mapTheme(title_size = 14)
 ```
 #### 11. The bar plot making this comparison.
@@ -748,7 +746,7 @@ rbind(burg_KDE_sf, burg_risk_sf) %>%
     ggplot(aes(Risk_Category,Rate_of_test_set_opioid)) +
       geom_bar(aes(fill=label), position="dodge", stat="identity") +
       scale_fill_viridis(discrete = TRUE) +
-      labs(title = "Risk prediction vs. Kernel density, 2018 weapon violation") +
+      labs(title = "Risk prediction vs. Kernel density, 2017") +
       theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
 ```
 ## IV. Conclusion
