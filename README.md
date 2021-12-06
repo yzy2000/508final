@@ -1,4 +1,4 @@
-# Predict Opioid Overdose Events to Better Allocate Prevention Resources
+# Predict Opioid Overdose Events in Cincinnati
 
 ## Group Members: Ziyi Yang, Xiaoyi Wu
 
