@@ -1,0 +1,870 @@
+---
+title: "Final Project--Predict Opioid Overdose Events in Cincinnati"
+author: "Ziyi Yang & Xiaoyi Wu"
+date: "12/2/2021"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    fig_width: 10
+    fig_height: 9
+    theme: united
+    highlight: tango
+---
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+![](opioid.png)
+
+## I. Introduction-- Motivation
+
+Drug overdose deaths in the United States quadrupled between 1999 and 2017, then reversed slightly in 2018. Two-thirds of drug overdose deaths involve opioids (prescription opioids, heroin and illegal fentanyl). Ways to reduce overdoses include safer prescribing, expanded treatment for people with opioid use disorder (OUD), and harm reduction programs (e.g., naloxone distribution). [In the summer of 2016](https://www.washingtonpost.com/news/morning-mix/wp/2016/08/29/this-is-unprecedented-174-heroin-overdoses-in-6-days-in-cincinnati/), Cincinnati experienced an unprecedented instantaneous heroin overdose. Cincinnati firefighters have responded to nearly 1600 overdose emergencies over the year. "This is an epidemic in our community that must be addressed. We are working with the State of Ohio and local partners to tackle this crisis,” [said Mayor John Cranley](https://www.cincinnati-oh.gov/mayor/news/cincinnati-heroin-epidemic-mayor-cranley-councilmember-sittenfeld-announce-initiatives-to-combat-opioid-overdoses/).Each needs a strategy to identify high-need populations, but officer often operate without a comprehensive understanding of the risks associated with the entire community. 
+In this project, we will estimate a geospatial risk prediction model, predicting overdoses as a function of environmental factors. 
+
+**Use Case**:
+* Display occurred overdose case detailed information
+* Show spatial distribution around fire stations
+* Equipping officers with opioid overdose antidote naloxone
+
+It can help the local government especially for Cincinnati Fire Department to allocate their resources more efficiently. By analyzing the actual overdose location and risk factors, CFD staff can have a sense about which areas/quarter mile within a engine have a higher density of overdose cases that might need to more services and interventions in that area or equipping officers with the opioid overdose antidote naloxone. Additional focus on overdose-incidence areas and funding extensive community outreach efforts to educate individuals on how to recognize opioid overdoses and take immediate life-saving measures.
+
+## II. Setup and Data Loading
+
+### 2.1 Setup
+
+In this section, we loaded necessary libraries, created plot theme options and map theme options, and identified functions of quintile breaks, and average nearest neighbor distance for further analysis.
+
+```{r Load Libraries, echo=TRUE, message=FALSE, warning=FALSE, results=FALSE}
+# 1. load Libraries
+library(sf)
+library(tidyverse)
+library(mapview)
+library(spdep)
+library(caret)
+library(ckanr) 
+library(FNN)
+library(grid)
+library(gridExtra)
+library(ggcorrplot)
+library(jtools)   
+library(stargazer) 
+library(broom)
+library(tufte)
+library(rmarkdown)
+library(kableExtra)
+library(tidycensus)
+library(RSocrata)
+library(viridis)
+library(spatstat)
+library(raster)
+library(knitr)
+library(rgdal)
+library(kableExtra)
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+### 2.2 Data Preparation
+
+* [**Cincinnati Boundary**](https://data-cagisportal.opendata.arcgis.com/datasets/cincinnati-city-boundary/explore): A base and outline of the City of Cincinnati.
+https://opendata.arcgis.com/datasets/ed78f4754b044ac5815d0a9efe9bb336_1.geojson 
+* [**Cincinnati Neighborhoods**](https://data-cagisportal.opendata.arcgis.com/datasets/cincinnati-community-council-boundaries/explore): A base and outline of the neighborhoods of Cincinnati. 
+https://opendata.arcgis.com/datasets/fff393f0112544b397838f9cf4d7765a_1.geojson
+* [**FireHouse**](https://data.cincinnati-oh.gov/Safety/Hamilton-County-Firehouse-Locations/ukeu-h8z6): Geojson file contains all firehouses location in Hamilton County. https://opendata.arcgis.com/datasets/a6f043d181f94e37a274975a3718b7af_16.geojson
+
+**Opioid  Overdose Data**: This analysis focuses on opioid overdose cases in Cincinnati. 
+
+* [**Opioid Overdose**](https://github.com/sydng/Cincinatti_Overdose_Data): This repository hosts a now deprecated version of EMS data for opioid overdose dispatches for Cincinnati, OH with xy coordinates. Data for July 2015 through November 2017 is included.
+
+**Risk Factors Data**: This analysis selects six point level features that may intrigue opioid cases to build the model. These datasets can be found from Cincinnati 311 (Non-Emergency) Service Requests. (https://data.cincinnati-oh.gov/Thriving-Neighborhoods/Cincinnati-311-Non-Emergency-Service-Requests/4cjh-bm8b)
+
+* [**Abandon Cars**] * [**Dead Animals**] * [**Graffiti**] * [**Trash**] * [**Streets needed Cleaning**] * [**Pothole**]
+
+
+```{r dataset, message=FALSE, warning=FALSE, results = FALSE}
+cinPD <- 
+  st_read("https://opendata.arcgis.com/datasets/9bc1afaff72e4f44a6d19280c159c951_4.geojson") %>%
+  st_transform('ESRI:102258')
+
+cinBoundary <- 
+  st_read("https://opendata.arcgis.com/datasets/ed78f4754b044ac5815d0a9efe9bb336_1.geojson") %>%
+  st_transform('ESRI:102258') 
+
+firestation <- st_read("https://opendata.arcgis.com/datasets/a6f043d181f94e37a274975a3718b7af_16.geojson") %>%
+  filter(BND_NAME == "CINCINNATI")%>%
+  st_transform(st_crs(cinBoundary))
+
+#2016 Opioid Overdose Data
+opioid <- 
+  st_read("Cinci_Overdoses.geojson") %>% 
+  filter(grepl(2016,CREATE_TIM)) %>%
+  st_transform('ESRI:102258') 
+
+opioid17 <- 
+  st_read("Cinci_Overdoses.geojson") %>% 
+  filter(grepl(2017,CREATE_TIM)) %>%
+  st_transform('ESRI:102258') 
+
+# Creating a fishnet grid
+cin_fishnet <- 
+  st_make_grid(cinBoundary,
+               cellsize = 500, 
+               square = TRUE) %>%
+  .[cinBoundary] %>% 
+  st_sf() %>%
+  mutate(uniqueID = rownames(.))
+
+cinNeigh <-
+  st_read("https://opendata.arcgis.com/datasets/fff393f0112544b397838f9cf4d7765a_1.geojson") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet)) 
+
+# import risk factors
+request_311 <-
+  st_read("Cincinnati_311__Non-Emergency__Service_Requests.csv") %>% 
+  filter(grepl(2016,REQUESTED_DATE))
+
+dead_animals <- request_311%>%
+  filter(grepl("DAPUB1",SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "dead_animals")
+
+abandon_cars <- request_311%>%
+  filter(grepl("ABAN-VPR", SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "abandon_cars")  
+
+pothole <- request_311%>%
+  filter(grepl("PTHOLE",SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "pothole")
+
+trash <- request_311%>%
+  filter(grepl("RF-COLLT",SERVICE_CODE) |grepl("TRASH-I",SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "trash")
+
+graffiti <- request_311%>%
+  filter(grepl("GRFITI",SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "graffiti")
+
+street_cleaning <- request_311%>%
+  filter(grepl("SCLEN1",SERVICE_CODE))%>%
+  dplyr::select(Y = LATITUDE, X = LONGITUDE) %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102258') %>%
+  st_transform(st_crs(cin_fishnet))%>%
+  mutate(Legend = "street_cleaning")
+
+# Census data
+# View(load_variables(2018,'acs5',cache = TRUE))
+tracts16 <- 
+  get_acs(geography = "tract", variables = c("B00001_001E","B02001_002E","B19013_001E","B25002_001E","B06012_002E","B27011_008E"), 
+          year=2016, state="OH", county="Hamilton", geometry=T, output="wide") %>%
+  st_transform('ESRI:102258') %>%
+  rename(TotalPop = B00001_001E, 
+         Whites = B02001_002E,
+         MedHHInc = B19013_001E,
+         TotalUnit = B25002_001E,
+         TotalPoverty = B06012_002E,
+         TotalUnemployment = 	B27011_008E) %>%
+dplyr::select(-NAME, -starts_with("B")) %>% #-starts_with("B") awesome!
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop * 100,0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop *100, 0),
+         pctUnemploy = ifelse(TotalPop > 0, TotalUnemployment / TotalPop *100, 0)
+         ) %>%
+  dplyr::select(-Whites, -TotalPoverty ,-TotalUnemployment,-GEOID) %>%
+  st_transform(st_crs(cin_fishnet)) 
+
+tracts16.MedHHInc <- tracts16 %>%
+  dplyr::select(MedHHInc) %>%
+  rename(Legend = MedHHInc)
+tracts16.pctWhite <- tracts16 %>%
+  dplyr::select(pctWhite)%>%
+  rename(Legend = pctWhite)
+tracts16.pctPoverty <- tracts16 %>%
+  dplyr::select(pctPoverty)%>%
+  rename(Legend = pctPoverty)
+tracts16.pctUnemploy <- tracts16 %>%
+  dplyr::select(pctUnemploy)%>%
+  rename(Legend = pctUnemploy)
+```
+
+## III. Visualizaion and Analysis
+
+***METHOD*** This analysis uses open sourced data from the City of Cincinnati’s Open Data Portal. Using a fishnet grid, I break the city into square cells to design a model which predicts the risk of opioid overdose cases occurrence in each cell based on its risk factor data.
+
+### 3.1 Exploratory Analysis
+
+#### 3.1.1 A map of opioid overdose events in 2016, Cincinnati
+
+Figure 1.1 and 1.2 below show the distribution of Cincinnati opioid overdose events in 2016. We can see from the below map that there are two distinct hotspots area. The overdose events concentrated in the south and west of the city. 
+```{r opioid, echo=TRUE, message=FALSE, warning=FALSE}
+# 1. A map of opioid overdose cases in 2016, Cincinnati
+grid.arrange(ncol=2,
+             ggplot() + 
+               geom_sf(data = cinBoundary) +
+               geom_sf(data = opioid, colour="darkred", size=0.1, show.legend = "point") +
+               labs(title= "Opioid Overdose Cases in 2016",
+                    subtitle = 'Cincinnnati, OH\n',
+                    caption = 'Figure 1.1') +
+               mapTheme() +
+               plotTheme(),
+             
+             ggplot() + 
+               geom_sf(data = cinBoundary, fill = "#E5E5E5") +
+               stat_density2d(data = data.frame(st_coordinates(opioid)), 
+                              aes(X, Y, fill = ..level.., alpha = ..level..),
+                              size = 0.01, bins = 40, geom = 'polygon') +
+               scale_fill_viridis_c(option = "plasma") +
+               scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+               labs(title = "Density of opioid overdose Cases in 2016",
+                    subtitle = 'Cincinnati, OH\n',
+                    caption = 'Figure 1.2') +
+               mapTheme() + 
+               theme(legend.position = "none") +
+               plotTheme())
+```
+
+#### 3.1.2 A map of shooting crime joined to the fishnet
+
+Figure 2 presents the opioid events in a fishnet which is the basic scale this analysis mainly works at. 
+
+```{r opioidnet, echo=TRUE, message=FALSE, warning=FALSE}
+# Aggregate points to the fishnet
+opioid_net <- 
+  dplyr::select(opioid) %>% 
+  mutate(countopioid = 1) %>% 
+  aggregate(., cin_fishnet, sum) %>%
+  mutate(countopioid = replace_na(countopioid, 0),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(cin_fishnet) / 24), 
+                       size=nrow(cin_fishnet), replace = TRUE))
+ggplot() +
+  geom_sf(data = opioid_net, aes(fill = countopioid), color = NA) +
+  scale_fill_viridis() +
+  labs(title = "Observed Opioid overdose Joined to Fishnet, 2016",
+       subtitle = 'Cincinnati, OH\n',
+       caption = 'Figure 2') +
+  mapTheme() +
+  plotTheme()
+```
+
+#### 3.1.3 A Bar Chart of Opioid Incidents within 1/4-Mile of Each Fire Station
+
+The Cincinnati Fire Department operate 26 fire stations throughout the city neighborhoods of Cincinnati. As we can see from the bar chart below, the number of overdoses occurring within a quarter mile of each site varies significantly. Some sites experienced quite a few overdoses within a quarter mile, while others had almost no overdoses within a quarter mile. In south of the city, Engine 03, Engine 05 had more than 200 overdoses within a quarter mile in 2016. Engine 08, Engine37 experienced fewer than 20 overdoses within a quarter mile. This metric tells us which sites might need additional resources.
+
+```{r barchart, message=FALSE, warning=FALSE}
+stationsBuffer_QtrMi <- 
+  st_buffer(firestation, 1320)
+
+#determine the count of overdoses within 1/4-mile of each fire station
+DoseCentroids <- 
+  st_centroid(opioid) %>%
+  mutate(counter = 1) %>% 
+  dplyr::select(counter)
+
+buffersAndDose <- 
+  aggregate(DoseCentroids, stationsBuffer_QtrMi, sum) %>%
+  cbind(stationsBuffer_QtrMi) %>%
+  mutate(counter = replace_na(counter, 0),
+         Area = as.numeric(st_area(.))) 
+
+summarizeFire <-
+  buffersAndDose %>%
+  group_by(ENGINE) %>%
+  summarize(Building_Count = sum(counter))
+
+
+#plot the data in a bar chart  
+ggplot(data = buffersAndDose, aes(x = reorder(ENGINE,-counter), y = counter, fill = "#BD0026")) +
+  geom_bar(stat = "identity", color = "black", size = 1) + 
+  scale_fill_manual(values = c("#BD0026")) +
+  labs(title = "Count of Overdose Incidents within a 1/4-Mile of Each Fire Station", 
+       x = "Fire Station", y = "Count of Overdoses Within 1/4-Mile") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", size = 16), axis.title = element_text(face = "italic")) 
+```
+
+#### 3.1.4 A map of Overdose Incidents within 1/4-Mile of Each Fire Station
+
+```{r buffer map, warning=FALSE, message=FALSE}
+data_cuts <- cut(summarizeFire$Building_Count, 5)
+ggplot() +
+  geom_sf(data = cinBoundary, fill = "grey40") +
+  geom_sf(data = summarizeFire, aes(fill = q5(Building_Count)), 
+          show.legend = "") +
+  geom_sf(data = firestation, aes(),fill ="black")+
+  scale_fill_manual(values = palette5,
+                    label= levels(data_cuts), 
+                      name="Quintile\nBreaks") +
+  labs(title="Overdose Events Within 1/4-Mile of Fire Station",
+       caption = "Figure 3.1.4" ) +
+  mapTheme()
+```
+
+### 3.2 Risk Factor Exploratory Analysis
+
+In order to establish a model that can capture more characteristics of overdose occurrence patterns, this analysis selected risk factors related to overdose on the basis of previous studies. These risk factors were obtained from Cincinnati 311 Request data. These complaints serve as the basis for several risk factor categories, such as abandoned vehicles, graffiti, trash and streets that need to be cleaned, dead animals, and potholes. These variables largely serve as indicators of neighborhood conditions and investment levels in an area. Treating overdoses as environmental factors, such as crime, 311. According to the broken window theory, there is a link between community "chaos" and overdoses. Features of the built environment may signal a local tolerance for crime. Areas with higher numbers of complaints saw more overdoses.
+
+#### 3.2.1  Map set of risk factors in the fishnet
+
+```{r risk, echo=TRUE, message=FALSE, warning=FALSE}
+# All variables in fishnet 
+vars_net <- 
+  rbind(abandon_cars, dead_animals,pothole,trash,graffiti,street_cleaning) %>%
+  st_join(., cin_fishnet, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+  full_join(cin_fishnet, by = "uniqueID") %>%
+  spread(Legend, count, fill=0) %>%
+  st_sf() %>%
+  na.omit() %>% 
+  dplyr::select(-`<NA>`) %>%
+  ungroup()
+### Multiple map for feature counts in fishnet
+vars_net.long <- 
+  gather(vars_net, Variable, value, -geometry, -uniqueID)
+vars <- unique(vars_net.long$Variable)
+mapList <- list()
+for(i in vars){
+  mapList[[i]] <- 
+    ggplot() +
+    geom_sf(data = filter(vars_net.long, Variable == i), aes(fill=value), colour=NA) +
+    scale_fill_viridis_c(option = "plasma",
+                         name = " ") +
+    labs(title=i) +
+    mapTheme()}
+do.call(grid.arrange,c(mapList, ncol =3, top = "Figure. 3.2.1 Risk Factors by Fishnet\n"))
+## Nearest Neighbor Feature
+# convenience to reduce length of function names.
+st_c <- st_coordinates
+st_coid <- st_centroid
+## create NN from abandoned cars, k = 3
+'%!in%' <- function(x,y)!('%in%'(x,y))
+vars_net$abandon_cars.nn <- 
+  nn_function(st_c(st_coid(vars_net)),st_c(abandon_cars),k = 3)
+
+vars_net$dead_animals.nn <-
+           nn_function(st_c(st_coid(vars_net)),st_c(dead_animals),k = 3)
+
+vars_net$pothole.nn <-
+           nn_function(st_c(st_coid(vars_net)),st_c(pothole),k = 3)
+
+vars_net$trash.nn <-
+           nn_function(st_c(st_coid(vars_net)),st_c(trash),k = 3) 
+
+vars_net$graffiti.nn <-
+           nn_function(st_c(st_coid(vars_net)),st_c(graffiti),k = 3) 
+
+vars_net$street_cleaning.nn <-
+           nn_function(st_c(st_coid(vars_net)),st_c(street_cleaning),k = 3)
+## Visualize the nearest three features
+vars_net.long.nn <- 
+  dplyr::select(vars_net, ends_with(".nn")) %>%
+  gather(Variable, value, -geometry)
+vars <- unique(vars_net.long.nn$Variable)
+mapList <- list()
+for(i in vars){
+  mapList[[i]] <- 
+    ggplot() +
+    geom_sf(data = filter(vars_net.long.nn, Variable == i), aes(fill=value), colour=NA) +
+    scale_fill_viridis_c(option = "plasma",
+                         name = " ") +
+    labs(title=i) +
+    mapTheme() +
+    plotTheme()}
+do.call(grid.arrange,c(mapList, ncol = 3, bottom = "Figure 3.2.1 Nearest Neighbor risk Factors by Fishnet\n"))
+
+# IV and DVs all in fishnet
+cin_final_net <-
+  left_join(opioid_net, st_drop_geometry(vars_net), by="uniqueID") 
+cin_final_net <-
+  st_centroid(cin_final_net) %>%
+  st_join(dplyr::select(cinNeigh, NEIGH), by = "uniqueID") %>%
+  st_join(dplyr::select(cinPD, DISTRICT), by = "uniqueID") %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(cin_final_net, geometry, uniqueID)) %>%
+  st_sf() %>%
+  na.omit()
+```
+
+### 3.3 Exploring the spatial process of Opioid Overdose
+
+#### 3.3.1 Local Moran's I-related small multiple map
+
+Before establishing a robust model, it is very important to find out whether the existing overdoses are clustered in space, where and how. By using local Moran's I statistics, overdose events tend to cluster distribution rather than the expected region of random distribution. In the figure, we can see that only some regions with more observed excess cases have high clustering (high Moran's I).
+
+With the hotspots identified, We continue engineer two new features for our model: opioid.isSig tells whether a cell is in a certain hotspot, and opioid.isSig.dist is the distance from a cell to its nearest hotspot. These two features allow us to factor in the spatial clustering of shooting.
+
+```{r moran, echo=TRUE, message=FALSE, warning=FALSE}
+## spatial weights matrix
+cin_final_net.nb <- poly2nb(as_Spatial(cin_final_net), queen=TRUE)
+cin_final_net.weights <- nb2listw(cin_final_net.nb, style="W", zero.policy=TRUE)
+
+local_morans <- localmoran(cin_final_net$countopioid,cin_final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+cin_final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(cin_final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(opioid_Count = countopioid, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+vars <- unique(cin_final_net.localMorans$Variable)
+varList <- list()
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+    geom_sf(data = filter(cin_final_net.localMorans, Variable == i), 
+            aes(fill = Value), colour=NA) +
+    scale_fill_viridis_c(option = "plasma",
+                         name = " ") +
+    labs(title=i,
+         caption = "Figure 3.3.1 Local Moran's I Statistics, Opioid Overdose Incidents") +
+    mapTheme() + theme(legend.position="right") +
+    plotTheme()}
+do.call(grid.arrange,c(varList, ncol = 2, bottom = "Local Morans I statistics, Opioid Overdose"))
+
+### Distance to highly significant shooting hotpot
+cin_final_net <- cin_final_net %>% 
+  mutate(opioid.isSig = 
+           ifelse(local_morans[,5] <= 0.001, 1, 0)) %>%
+  mutate(opioid.isSig.dist = 
+           nn_function(st_c(st_coid(cin_final_net)),
+                       st_c(st_coid(filter(cin_final_net, 
+                                           opioid.isSig == 1))), 
+                       k = 1))
+
+ggplot() +
+      geom_sf(data = cin_final_net, aes(fill=opioid.isSig.dist), colour=NA) +
+      scale_fill_viridis(name="NN Distance") +
+      labs(title="Distance to highly significant weapon violation hot spot",
+      caption = "Figure 3.3.1") +
+      mapTheme()
+```
+
+#### 3.3.2. A small multiple scatterplot with correlations
+
+Now that we have a complete set of risk factor characteristics, we explore the correlation between these characteristics and overdose, which is shown in the figure below. Intuitively, all selected characteristics were positively correlated with the number of overdose cases.
+
+```{r scatterplot, echo=TRUE, message=FALSE, warning=FALSE}
+# A small multiple scatterplot with correlations
+cin.correlation.long <-
+  st_drop_geometry(cin_final_net) %>%
+    dplyr::select(-uniqueID, -cvID, -NEIGH, -DISTRICT) %>%
+    gather(Variable, Value, -countopioid)
+
+cin.correlation.cor <-
+  cin.correlation.long %>%
+  group_by(Variable) %>%
+  summarize(cin.correlation = cor(Value, countopioid, use = "complete.obs"))
+ggplot(cin.correlation.long, aes(Value, countopioid)) +
+  geom_point(size = 0.1) +
+  geom_text(data = cin.correlation.cor, aes(label = paste("r =", round(cin.correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~Variable, ncol = 4, scales = "free") +
+  labs(title = "Overdoses as a Function of Risk Factors",
+       subtitle = "Cincinnati, OH\n",
+       caption = "Figure 3.3.2")+
+  plotTheme()
+```
+
+#### 3.3.3 A histogram of dependent variable
+
+Since overdose events are relatively uncommon, it is reasonable that most grid cells do not contain events. According to the following bar chart, OLS regression is not appropriate and the distribution of dependent variables is poisson distribution, indicating that Poisson model should be considered when establishing the model.
+
+```{r histogram, echo=TRUE, message=FALSE, warning=FALSE}
+# A histogram of dependent variable
+ggplot(data = cin_final_net) +
+  geom_histogram(aes(x = countopioid), fill = 'orange') +
+  scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
+  labs(title="Histogram of Dependent Variable: Opioid Overdose",
+       subtitle = "Cincinnati, OH\n",
+       caption = "Figure 3.3.3") +
+  xlab('Count of Opioid') +
+  ylab('Count') +
+  plotTheme()
+```
+
+## IV. Regression Model Building and Accuracy, Generalzability
+
+### 4.1 A small multiple map of model errors by random k-fold and spatial cross validation.
+
+For a given risk factor, we selected the feature count in each fishnet, the distance to the hotspot of overdose event and the distance to the hotspot of important overdose as the features used in the model to avoid collinearity. We also added the local Moran's I spatial process feature.
+
+The fit index is generated for four regressions, two of which include * just risk factors * ("rega. Vars"), and the second ("rega. SS. Vars") includes risk factors plus the created local Moran's I spatial process feature. The best way to test for this is to hold out one local area, train the model on the remaining n - 1 areas, predict for the hold out, and record the goodness of fit, which is the cross-validation approach called LEAVE ONE GROUP OUT (LOGO-CV) used in the analysis. `reg.ss.cv` performs random k-fold cross validation using spatial process features, while `reg.ss.spatialCV` performs LOGO-CV, spatial cross-validation on neighborhood name, using the same features. Same processes are also conducted on *Just Risk Factors*. 
+
+```{r fold, message=FALSE, warning=FALSE, include=FALSE}
+## define the variables 
+reg.vars <- c("abandon_cars.nn" , "dead_animals.nn","pothole.nn", "trash.nn","graffiti.nn","street_cleaning.nn")
+reg.ss.vars <- c("abandon_cars.nn" , "dead_animals.nn","pothole.nn", "trash.nn","graffiti.nn", "street_cleaning.nn","opioid.isSig" ,"opioid.isSig.dist")
+
+## Define crossValidate function
+crossValidate <- function(dataset, id, dependentVariable, indVariables) {
+  
+  allPredictions <- data.frame()
+  cvID_list <- unique(dataset[[id]])
+  for (i in cvID_list) {
+    thisFold <- i
+    cat("This hold out fold is", thisFold, "\n")
+    fold.train <- filter(dataset, dataset[[id]] != thisFold) %>% as.data.frame() %>% 
+      dplyr::select(id, geometry, indVariables, dependentVariable)
+    fold.test  <- filter(dataset, dataset[[id]] == thisFold) %>% as.data.frame() %>% 
+      dplyr::select(id, geometry, indVariables, dependentVariable)
+    
+    regression <-
+      glm(countopioid ~ ., family = "poisson", 
+          data = fold.train %>% 
+            dplyr::select(-geometry, -id))
+    
+    thisPrediction <- 
+      mutate(fold.test, Prediction = predict(regression, fold.test, type = "response"))
+    
+    allPredictions <-
+      rbind(allPredictions, thisPrediction)
+    
+  }
+  return(st_sf(allPredictions))
+}
+
+###  create random k-fold cv
+reg.cv <- crossValidate(
+  dataset = cin_final_net,
+  id = "cvID",
+  dependentVariable = "countopioid",
+  indVariables = reg.vars) %>%
+  dplyr::select(cvID = cvID, countopioid, Prediction, geometry)
+
+reg.ss.cv <- crossValidate(
+  dataset = cin_final_net,
+  id = "cvID",
+  dependentVariable = "countopioid",
+  indVariables = reg.ss.vars) %>%
+  dplyr::select(cvID = cvID, countopioid, Prediction, geometry)
+
+###  create spatial cross validation
+reg.spatialCV <- crossValidate(
+  dataset = cin_final_net,
+  id = "NEIGH",                            
+  dependentVariable = "countopioid",
+  indVariables = reg.vars) %>%
+  dplyr::select(cvID = NEIGH, countopioid, Prediction, geometry)
+
+reg.ss.spatialCV <- crossValidate(
+  dataset = cin_final_net,
+  id = "NEIGH",                            
+  dependentVariable = "countopioid",
+  indVariables = reg.ss.vars) %>%
+  dplyr::select(cvID = NEIGH, countopioid, Prediction, geometry)
+
+# Bind four CVs together
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,Error = Prediction - countopioid, Regression = "Random k-fold CV: Just Risk Factors"),
+    mutate(reg.ss.cv,Error = Prediction - countopioid, Regression = "Random k-fold CV: Spatial Process"),
+    mutate(reg.spatialCV, Error = Prediction - countopioid, Regression = "Spatial LOGO-CV: Just Risk Factors"),
+    mutate(reg.ss.spatialCV, Error = Prediction - countopioid, Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+
+# calculate and visualize MAE for each fold 
+error_by_reg_and_fold <- 
+  reg.summary %>%
+  group_by(Regression, cvID) %>% 
+  summarize(Mean_Error = mean(Prediction - countopioid, na.rm = T),
+            MAE = mean(abs(Mean_Error), na.rm = T),
+            SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+```
+
+
+### 4.2 Model errors by random k-fold and spatial cross validation
+
+#### 4.2.1 Distribution of MAE
+
+Figure 4.2.1 below displays the distribution of MAE across all models. Some small errors clustering can be captured, indicating the models perform well in terms of generalizability across the city.
+
+```{r mae, echo=TRUE, message=FALSE, warning=FALSE}
+## Distribution of MAE
+error_by_reg_and_fold %>%
+  ggplot(aes(MAE)) + 
+  geom_histogram(bins = 30, colour="black", fill = "#5dccb9") +
+  facet_wrap(~Regression) +  
+  geom_vline(xintercept = 0) + 
+  scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
+  labs(title="Distribution of MAE", 
+       subtitle = "k-fold cross validation vs. LOGO-CV\n",
+       caption = "Figure 4.2.1",
+       x="Mean Absolute Error", y="Count") +
+  plotTheme()
+```
+
+#### 4.2.2 Visualizes the random k-fold and LOGO-CV errors spatially.
+
+Figure 4.2.2 provides additional information on the errors across models. The largest errors are in the hotspot locations. 
+
+```{r kfold, echo=TRUE, message=FALSE, warning=FALSE}
+error_by_reg_and_fold %>%
+  ggplot() +
+  geom_sf(aes(fill = MAE)) +
+  facet_wrap(~Regression) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "Overdose Errors by Rondom k-fold and LOGO-CV Regression\n",
+       caption = 'Figure 4.2.2') +
+  mapTheme() + 
+  theme(legend.position="bottom") +
+  plotTheme()
+```
+
+### 4.3 Predicted overdose and observed overdose
+
+Interestingly, Figure 4.3 below shows that all models over-predict in low overdose-rate areas and under-predict in hot spot areas. Over-predictions in lower overdose areas may highlight areas of latent risk. Under-prediction in higher overdose areas may reflect difficulty predicting the hotspots.
+
+```{r compare, warning=FALSE, message=FALSE}
+st_drop_geometry(reg.summary) %>%
+  group_by(Regression) %>%
+  mutate(opioid_Decile = ntile(countopioid, 10)) %>%
+  group_by(Regression, opioid_Decile) %>%
+  summarize(meanObserved = mean(countopioid, na.rm=T),
+            meanPrediction = mean(Prediction, na.rm=T)) %>%
+  gather(Variable, Value, -Regression, -opioid_Decile) %>%          
+  ggplot(aes(opioid_Decile, Value, shape = Variable)) +
+  geom_point(size = 2) + 
+  geom_path(aes(group = opioid_Decile), colour = "black") +
+  scale_shape_manual(values = c(2, 17)) +
+  facet_wrap(~Regression) + xlim(0,10) +
+  labs(title = "Predicted and Observed Opioid Overdose Events",
+       subtitle = "Cincinnati, OH\n",
+       caption = "Figure 4.3",
+       x = 'Opioid Decile') +
+  plotTheme()
+```
+
+### 4.4 A table of MAE and standard deviation MAE by regression.
+
+Because logo-cv is a very conservative assumption, the robustness of the model for spatial cross validation is slightly poor. Table below confirms my assumption that the **Spatial Process** features improve the model. The average count of observed shooting cases in each cell is 0.0837, while the average count of predicted shooting cases in each cell is 0.0856.
+
+```{r sdmae, echo=TRUE, message=FALSE, warning=FALSE}
+st_drop_geometry(error_by_reg_and_fold) %>%
+  group_by(Regression) %>% 
+    summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable() %>%
+    kable_styling("striped", full_width = F) %>%
+    row_spec(2, color = "black", background = "#FDE725FF") %>%
+    row_spec(4, color = "black", background = "#FDE725FF")
+```
+
+### 4.5 Generalizability by neighborhood context
+
+To test whether the algorithm can be generalized in different neighborhood contexts, TidyCensus is used to pull data through census areas. MedHHInc is calculated and the slices are divided into two groups, High_Income and Low_Income. Spatial subsets are used to obtain regions within the study area.
+
+```{r race, message=FALSE, warning=FALSE, results=FALSE}
+## Fetch census data
+# View(load_variables(2017,'acs5',cache = TRUE))
+#variable19 <- load_variables(2017, "acs5", cache = TRUE)
+
+tracts17<- 
+  get_acs(geography = "tract",variables = c("B01001_001E","B02001_002E","B19013_001E"),  
+          year=2017, state="OH", county="Hamilton", geometry=T, output="wide") %>%
+  st_transform('ESRI:102258') %>%
+  rename(TotalPop = B01001_001E, 
+         Whites = B02001_002E,
+         MedHHInc = B19013_001E) %>%
+  mutate(percentWhite = Whites / TotalPop,
+         raceContext = ifelse(percentWhite > .5, "Majority_White", "Majority_Non_White"),
+         Income = ifelse(MedHHInc > 60000, "High_Income", "Low_Income")) %>%
+  .[cinNeigh,]
+
+ggplot() + 
+  geom_sf(data = na.omit(tracts17), aes(fill = Income)) +
+  scale_fill_manual(values = c("#fbb4b9", "#bdd7e7"), name="Income") +
+  labs(title = "Income Context",
+       subtitle = "Cincinnati, OH\n",
+       caption = 'Figure 4.5') +
+  mapTheme() + 
+  theme(legend.position="bottom") +
+  plotTheme()
+```
+
+
+#### 4.5.2 A Table of Mean Error by Neighborhood Income Context
+
+A positive difference represents an over-prediction. The model over-predict risk in higher-income areas and under predict risk in lower-income areas. If reporting selection bias is a problem, then this model may unfairly and disproportionately distribute resources within the community.
+
+```{r race table, warning=FALSE, message=FALSE}
+reg.summary %>% 
+  filter(str_detect(Regression, "LOGO")) %>%
+  st_centroid() %>%
+  st_join(tracts17) %>%
+  na.omit() %>%
+  st_drop_geometry() %>%
+  group_by(Regression, Income) %>%
+  summarize(mean.Error = mean(Error, na.rm = T)) %>%
+  spread(Income, mean.Error) %>%
+  kable(caption = "Table 4.5 Mean Error by Neighborhood Income Context") %>%
+  kable_styling("striped", full_width = F) 
+```
+
+
+### 4.6 Model Alternative and Comparison
+
+#### 4.6.1 The Map Comparing Kernel Density to Risk Predictions
+
+In this section, this analysis is aimed at figuring out if the predictive policing model is able to better predict opioid overdose incidents compared with traditional model - **Kernel Density Model**.
+
+By making kernel density maps with different search radius scale (1000 Ft, 1500 Ft, and 2000 Ft), this analysis select the one with 1000 Ft search radius since it can better display the density of overdose cases.
+
+Next, a comparison map is generated of the risk categories for both model types with a sample of overdose cases in 2017 points overlaid. A well fit model should show that the risk predictions capture a greater share of 2017 opioid events in the highest risk category relative to the Kernel density.
+
+```{r kerneldensity, echo=TRUE, message=FALSE, warning=FALSE}
+### Make Kernel Density Map
+burg_ppp <- as.ppp(st_coordinates(opioid), W = st_bbox(cin_final_net))
+burg_KD.1000 <- spatstat.core::density.ppp(burg_ppp, 1000)
+burg_KD.1500 <- spatstat.core::density.ppp(burg_ppp, 1500)
+burg_KD.2000 <- spatstat.core::density.ppp(burg_ppp, 2000)
+burg_KD.df <- rbind(
+  mutate(data.frame(rasterToPoints(mask(raster(burg_KD.1000), as(cinNeigh, 'Spatial')))), Legend = "1000 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(burg_KD.1500), as(cinNeigh, 'Spatial')))), Legend = "1500 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(burg_KD.2000), as(cinNeigh, 'Spatial')))), Legend = "2000 Ft.")) 
+
+burg_KD.df$Legend <- factor(burg_KD.df$Legend, levels = c("1000 Ft.", "1500 Ft.", "2000 Ft."))
+
+ggplot(data=burg_KD.df, aes(x=x, y=y)) +
+  geom_raster(aes(fill=layer)) + 
+  facet_wrap(~Legend) +
+  coord_sf(crs=st_crs(cin_final_net)) + 
+  scale_fill_viridis(name="Density") +
+  labs(title = "Kernel density with 3 different search radii",
+  caption = "Figure 4.6.1")+
+  mapTheme(title_size = 14)
+```
+
+```{r shoot2017, message=FALSE, warning=FALSE, include=FALSE}
+### Fetch 2017 Opioid Overdose Data
+opioid17 <- opioid17%>%
+  distinct() %>%
+  .[cin_fishnet,] 
+```
+
+```{r kernel, echo=TRUE, message=FALSE, warning=FALSE}
+burg_KDE_sf <- as.data.frame(burg_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(cin_final_net)) %>%
+  aggregate(., cin_final_net, mean) %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = ntile(value, 100),
+         Risk_Category = case_when(
+           Risk_Category >= 90 ~ "90% to 100%",
+           Risk_Category >= 70 & Risk_Category <= 89 ~ "70% to 89%",
+           Risk_Category >= 50 & Risk_Category <= 69 ~ "50% to 69%",
+           Risk_Category >= 30 & Risk_Category <= 49 ~ "30% to 49%",
+           Risk_Category >= 1 & Risk_Category  <= 29 ~ "1% to 29%")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(opioid17) %>% mutate(opioidCount = 1), ., sum) %>%
+    mutate(opioidCount = replace_na(opioidCount, 0))) %>%
+  dplyr::select(label, Risk_Category, opioidCount)
+
+###Prediction by Risk Prediction Model
+burg_risk_sf <-
+  reg.ss.spatialCV %>%
+  mutate(label = "Risk Predictions",
+         Risk_Category = ntile(Prediction, 100),
+         Risk_Category = case_when(
+         Risk_Category >= 90 ~ "90% to 100%",
+         Risk_Category >= 70 & Risk_Category <= 89 ~ "70% to 89%",
+         Risk_Category >= 50 & Risk_Category <= 69 ~ "50% to 69%",
+         Risk_Category >= 30 & Risk_Category <= 49 ~ "30% to 49%",
+         Risk_Category >= 1 & Risk_Category <= 29 ~ "1% to 29%")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(opioid17) %>% mutate(opioidCount = 1), ., sum) %>%
+      mutate(opioidCount = replace_na(opioidCount, 0))) %>%
+  dplyr::select(label,Risk_Category, opioidCount)
+
+rbind(burg_KDE_sf, burg_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    geom_sf(data = sample_n(opioid17, 2500), size = .5, colour = "black") +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2016 opiod overdose risk predictions; 2017 opioid overdose",
+         caption = "Figure 4.6.1-2") +
+    mapTheme(title_size = 14)
+```
+
+#### 4.6.2 The bar plot making this comparison -- Model Performance.
+
+However, from figure 4.5.1 It can be seen that the advantages of predictive regulatory model do not seem to be consistent in all risk categories. For all risk categories below 90% and above 50%, the traditional nuclear density model is actually more accurate. However, for the highest category, the predictive police risk model is more accurate. This finding may mean that the predictive policing model constructed in this analysis can better locate the risk hot spots of overdose, which confirms this conclusion again.
+
+```{r bar, echo=TRUE, message=FALSE, warning=FALSE}
+rbind(burg_KDE_sf, burg_risk_sf) %>%
+  st_set_geometry(NULL) %>% na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(countopioid = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Rate_of_test_set_opioid = countopioid / sum(countopioid)) %>%
+    ggplot(aes(Risk_Category,Rate_of_test_set_opioid)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(discrete = TRUE) +
+      labs(title = "Risk prediction vs. Kernel density, 2017",
+      caption = "Figure 4.6.2")+
+      theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+#### 4.6.3 Example Map of Use Case
+
+```{r use case, warning=FALSE, message=FALSE}
+rbind(burg_KDE_sf, burg_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+  geom_sf(aes(fill = Risk_Category), colour = NA) +
+  geom_sf(data = stationsBuffer_QtrMi, color = "red",fill="transparent") +
+  geom_sf(data = firestation, aes(),fill ="black")+
+  scale_fill_viridis(discrete = TRUE) +
+  labs(title="Relative Risk Level in 2017 within Quarter Mile of Each Engine",
+       caption = "Figure 4.6.3") +
+  mapTheme(title_size = 14)
+
+```
+
+![alt text here](wireframe1.png)
+![alt text here](wireframe2.png)
+![alt text here](wireframe3.png)
+
+## IV. Conclusion
+
+Generally speaking, this model achieves the goal of identifying opioid overdose risk hotspots in Cincinnati since it predicts hotspots more accurately than the traditional - Kernel Density model. We want to build a Web application that Cincinnati Fire Department stakeholders could use to understand the risks in an area and which facilities are best suited to respond (with adequate supply of the opioid antidote naloxone). The above figure roughly satisfies the use case we proposed at the beginning,that is which area should be allocated more resources. It shows the final risk prediction map, which the app envisages allowing the user to check the average predicted level around a selected fire station.Officials can better allocate resources, whether more specialists or emergency medicine are needed, depending on the situation at each station.In our initial vision for the wireframe, you can search for an address directly and the overdose events that has been reported nearby will be displayed. Or you can directly select a certain fire station, and the hot spots of overdose events within a quarter of a mile around it will be distinguished by different colors.If you click on the firehouse, a pop-up shows the status of the Naloxone reserve within the firehouse. This will give officials information on whether they need additional resources in this fire station. The accuracy of the data is reduced because they are anonymous and some unreported cases. For future work, the model can be improved by including more data and also using the other year data to do validation . 
